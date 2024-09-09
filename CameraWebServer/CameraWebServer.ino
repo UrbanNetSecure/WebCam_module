@@ -1,8 +1,8 @@
 #include <WiFi.h>
 #include <WebServer.h>
 
-const char* ssid = "TP-Link_F374";
-const char* password = "bpm0x110!@#$";
+const char* ssid = "****";
+const char* password = "****";
 
 WebServer server(80);
 
