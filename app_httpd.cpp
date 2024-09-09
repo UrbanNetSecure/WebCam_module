@@ -24,10 +24,9 @@
 #include "esp32-hal-log.h"
 #endif
 
-// Face Detection will not work on boards without (or with disabled) PSRAM
+
 #ifdef BOARD_HAS_PSRAM
-// Face Recognition takes upward from 15 seconds per frame on chips other than ESP32S3
-// Makes no sense to have it enabled for them
+
 #if CONFIG_IDF_TARGET_ESP32S3
 #define CONFIG_ESP_FACE_RECOGNITION_ENABLED 1
 #define CONFIG_ESP_FACE_DETECT_ENABLED      1
@@ -73,10 +72,10 @@
 #define FACE_COLOR_PURPLE (FACE_COLOR_BLUE | FACE_COLOR_RED)
 #endif
 
-// Enable LED FLASH setting
+
 #define CONFIG_LED_ILLUMINATOR_ENABLED 1
 
-// LED FLASH setup
+
 #if CONFIG_LED_ILLUMINATOR_ENABLED
 
 #define LED_LEDC_GPIO            22  //configure LED pin
@@ -104,12 +103,6 @@ httpd_handle_t camera_httpd = NULL;
 
 static int8_t detection_enabled = 0;
 
-// #if TWO_STAGE
-// static HumanFaceDetectMSR01 s1(0.1F, 0.5F, 10, 0.2F);
-// static HumanFaceDetectMNP01 s2(0.5F, 0.3F, 5);
-// #else
-// static HumanFaceDetectMSR01 s1(0.3F, 0.5F, 10, 0.2F);
-// #endif
 
 #if CONFIG_ESP_FACE_RECOGNITION_ENABLED
 static int8_t recognition_enabled = 0;
