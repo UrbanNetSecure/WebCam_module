@@ -1,10 +1,10 @@
 # ESP32 Webcam Module #
 
 ## Requirements ##
-* *ESP32-CAM Module*
-* *FTDI USB to Serial Adapter* (for uploading the program to the ESP32-CAM)
-* *Arduino IDE *
-* *ESP32 Arduino Core* *
+* ESP32-CAM Module
+* FTDI USB to Serial Adapter* (for uploading the program to the ESP32-CAM)
+* Arduino IDE 
+* ESP32 Arduino Core
 
 ---
 ## Features ##
