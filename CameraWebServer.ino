@@ -2,6 +2,13 @@
 #include <WebServer.h>
 #include <HTTPClient.h>
 #include <map>
+#include <time.h>
+
+// NTP 서버 및 시간대 설정
+const char* ntpServer = "pool.ntp.org";
+const long gmtOffset_sec = 3600 * 9; // 시간대 오프셋 (UTC+1)
+const int daylightOffset_sec = 0; // 서머타임 오프셋
+
 const char* ssid = "Hackathon";
 const char* password = "hackathon2024";
 
@@ -13,9 +20,9 @@ String blockedIPs[MAX_BLOCKED_IPS];
 int blockedIPCount = 0;
 
 // Login attempt tracking
-const int MAX_ATTEMPTS = 40; // 1분 동안 최대 로그인 시도 횟수
-const unsigned long BLOCK_DURATION = 180000; // 차단 유지 시간 (3분)
-const int MAX_FAILED_ATTEMPTS = 5; // IP 차단을 위한 최대 실패 횟수
+const int MAX_ATTEMPTS = 40; // Maximum login attempts in 1 minute
+const unsigned long BLOCK_DURATION = 180000; // Block duration (3 minutes)
+const int MAX_FAILED_ATTEMPTS = 5; // Maximum failed attempts before IP blocking
 
 unsigned long lastAttemptTime = 0;
 int attemptCount = 0;
@@ -24,25 +31,38 @@ bool serverBlocked = false;
 std::map<String, int> failedAttempts;
 std::map<String, unsigned long> failedAttemptsTime;
 
-// Server URL (insert js servers url)
+String logBuffer = ""; // Buffer to store logs
+
+// Server URL (insert your server URL)
 const char* serverURL = "http://127.0.0.1:8000/log";
 
-void logAccess(String clientIP, String url, String method, String status) {
-  Serial.print("접속 IP: ");
-  Serial.println(clientIP);
-  Serial.print("요청 URL: ");
-  Serial.println(url);
-  Serial.print("요청 메서드: ");
-  Serial.println(method);
-  Serial.print("상태: ");
-  Serial.println(status);
+void logAccess(String clientIP, String url, String method, String status, String attackType) {
+  // Get current time from NTP
+  time_t now;
+  struct tm timeinfo;
+  time(&now);
+  localtime_r(&now, &timeinfo);
+
+  char timeStr[64];
+  strftime(timeStr, sizeof(timeStr), "%Y-%m-%d %H:%M:%S", &timeinfo);
+
+  // Fixed serial number
+  String serialNumber = "F234c1";
+
+  // Create formatted log string
+  String logLine = String(timeStr) + "/" + clientIP + "/" + serialNumber + "/" + status + "/" + attackType;
   
+  Serial.println(logLine);
+
+  // Save log to buffer
+  logBuffer += logLine + "\n";
+
   HTTPClient http;
-  String serverName = "http://127.0.0.1:8080/log";
+  String serverName = serverURL;
   
   http.begin(serverName);
   http.addHeader("Content-Type", "application/x-www-form-urlencoded");
-  String postData = "clientIP=" + clientIP + "&url=" + url + "&method=" + method + "&status=" + status;
+  String postData = "dateTime=" + String(timeStr) + "&clientIP=" + clientIP + "&serialNumber=" + serialNumber + "&url=" + url + "&method=" + method + "&status=" + status + "&attackType=" + attackType;
 
   int httpResponseCode = http.POST(postData);
 
@@ -58,7 +78,7 @@ void logAccess(String clientIP, String url, String method, String status) {
 void blockIP(String ip) {
   if (blockedIPCount < MAX_BLOCKED_IPS) {
     blockedIPs[blockedIPCount++] = ip;
-    Serial.print("차단된 IP: ");
+    Serial.print("Blocked IP: ");
     Serial.println(ip);
   }
 }
@@ -85,6 +105,7 @@ void handleFailedLogin(String clientIP) {
   
   if (failedAttempts[clientIP] >= MAX_FAILED_ATTEMPTS) {
     blockIP(clientIP);
+    logAccess(clientIP, server.uri(), server.method() == HTTP_GET ? "GET" : "POST", "IP_Blocked", "Dos");
     failedAttempts.erase(clientIP);
     failedAttemptsTime.erase(clientIP);
   }
@@ -96,10 +117,10 @@ void checkDDoS() {
   if (serverBlocked) {
     if (currentTime - lastAttemptTime > BLOCK_DURATION) {
       serverBlocked = false;
-      Serial.println("서버 로그인 차단 해제");
+      Serial.println("Server login block lifted");
     }
   } else {
-    if (currentTime - lastAttemptTime > 60000) { // 1분 지났다면 카운터 리셋
+    if (currentTime - lastAttemptTime > 60000) { // Reset counter after 1 minute
       lastAttemptTime = currentTime;
       attemptCount = 0;
     }
@@ -108,8 +129,9 @@ void checkDDoS() {
     
     if (attemptCount > MAX_ATTEMPTS) {
       serverBlocked = true;
-      lastAttemptTime = currentTime; // 차단 시작 시간 기록
-      Serial.println("서버 로그인 차단됨 (DDoS 공격 감지)");
+      lastAttemptTime = currentTime; // Record block start time
+      logAccess(server.client().remoteIP().toString(), server.uri(), server.method() == HTTP_GET ? "GET" : "POST", "Server Blocked", "DDoS");
+      Serial.println("Server login blocked (DDoS attack detected)");
     }
   }
 }
@@ -123,12 +145,12 @@ void handleLogin() {
   String clientIP = server.client().remoteIP().toString();
 
   if (isIPBlocked(clientIP)) {
-    logAccess(clientIP, server.uri(), server.method() == HTTP_GET ? "GET" : "POST", "IP 차단됨");
+    logAccess(clientIP, server.uri(), server.method() == HTTP_GET ? "GET" : "POST", "IP blocked", "Dos");
     server.send(403, "text/plain", "Access from blocked IP");
     return;
   }
 
-  logAccess(clientIP, server.uri(), server.method() == HTTP_GET ? "GET" : "POST", "로그인 시도");
+  logAccess(clientIP, server.uri(), server.method() == HTTP_GET ? "GET" : "POST", "Normal", "Login_Failed");
 
   if (server.hasArg("username") && server.hasArg("password")) {
     String username = server.arg("username");
@@ -139,13 +161,17 @@ void handleLogin() {
       server.send(302, "text/plain", "redirecting");
     } else {
       server.send(403, "text/plain", "login failed");
-      handleFailedLogin(clientIP); // 로그인 실패가 일정 횟수 초과 시 IP 차단
+      handleFailedLogin(clientIP); // Block IP after exceeding failed login attempts
     }
   } else {
     server.send(400, "text/plain", "Required info missing");
   }
 
-  checkDDoS(); // DDoS 공격 체크
+  checkDDoS(); // Check for DDoS attacks
+}
+
+void handleLog() {
+  server.send(200, "text/plain", logBuffer);
 }
 
 void handleLoginPage() {
@@ -211,55 +237,26 @@ void handleLoginPage() {
   server.send(200, "text/html", html);
 }
 
-
-void handleCCTV() {
-  server.send(200, "text/html", "<html><body><h1>CCTV Screen</h1><img src=\"/camera\"> </body></html>");
-}
-
-void handleHomePage() {
-  String html = "<html><head><style>"
-                "body { font-family: Arial, sans-serif; margin: 0; padding: 0; background-color: #f0f0f0; }"
-                "header { background-color: #444; padding: 20px; color: white; text-align: center; }"
-                "header h1 { margin: 0; font-size: 2em; }"
-                ".container { max-width: 800px; margin: 30px auto; padding: 20px; background: white; border-radius: 8px; box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1); text-align: center; }"
-                "h2 { color: #333; margin-bottom: 20px; }"
-                "pre { font-family: monospace; white-space: pre-wrap; text-align: center; background-color: #f9f9f9; padding: 15px; border-radius: 5px; box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1); }"
-                "button { background-color: #4CAF50; color: white; padding: 12px 24px; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; transition: background-color 0.3s; }"
-                "button:hover { background-color: #45a049; }"
-                "</style></head><body>"
-                "<header><h1>CCTV Admin Page</h1></header>"
-                "<div class='container'>"
-                "<h2>CCTV Live Feed</h2>"
-                "<pre>Login to manage CCTV</pre>"
-                "<button onclick=\"window.location.href='/login'\">Login</button>"
-                "</div>"
-                "</body></html>";
-  server.send(200, "text/html", html);
-}
-
-
-
 void setup() {
   Serial.begin(115200);
 
+  // Connect to Wi-Fi
   WiFi.begin(ssid, password);
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
-  Serial.println("");
-  Serial.println("WiFi 연결됨");
+  Serial.println("Connected to WiFi");
 
-  server.on("/", handleHomePage);
-  server.on("/login", HTTP_GET, handleLoginPage);
+  // Configure NTP
+  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+
+  // Start server routes
+  server.on("/", HTTP_GET, handleLoginPage);
   server.on("/login", HTTP_POST, handleLogin);
-  server.on("/cctv", HTTP_GET, handleCCTV);
+  server.on("/log", HTTP_GET, handleLog);
 
   server.begin();
-  Serial.println("웹 서버 시작");
-
-  Serial.print("웹 서버 주소: http://");
-  Serial.println(WiFi.localIP());
 }
 
 void loop() {
