@@ -6,17 +6,16 @@ const char* password = "****";
 
 WebServer server(80);
 
-//blocked IP list
-
+// Blocked IP List
 const int MAX_BLOCKED_IPS = 10;
-String blockedIPs [MAX_BLOCKED_IPS];
+String blockedIPs[MAX_BLOCKED_IPS];
 int blockedIPCount = 0;
 
-// functions to save logs
+// functions of log
 void logAccess(String clientIP, String url, String method, String status) {
   Serial.print("접속 IP: ");
   Serial.println(clientIP);
-  Serial.print("오청 URL: ");
+  Serial.print("요청 URL: ");
   Serial.println(url);
   Serial.print("요청 메서드: ");
   Serial.println(method);
@@ -28,7 +27,7 @@ void logAccess(String clientIP, String url, String method, String status) {
 // IP 차단 함수
 void blockIP(String ip) {
   if (blockedIPCount < MAX_BLOCKED_IPS) {
-    blockedIPs [blockedIPCount++] = ip;
+    blockedIPs[blockedIPCount++] = ip;
     Serial.print("차단된 IP: ");
     Serial.println(ip);
   }
@@ -44,13 +43,14 @@ bool isIPBlocked(String ip) {
   return false;
 }
 
+// login form handler
 void handleLogin() {
   String clientIP = server.client().remoteIP().toString();
 
-  // IP가 차단된 경우 로그인 시도 차단
+  // if the ip is blocked, deny login
   if (isIPBlocked(clientIP)) {
-    logAccess(clientIP, server.uri(), server.method() == HTTP_GET ? "GET" : "POST", "IP BLOCKED");
-    server.send(403, "text/plain", "차단된 IP에서의 접근입니다");
+    logAccess(clientIP, server.uri(), server.method() == HTTP_GET ? "GET" : "POST", "IP 차단됨");
+    server.send(403, "text/plain", "Access from blocked ip");
     return;
   }
 
@@ -60,20 +60,38 @@ void handleLogin() {
     String username = server.arg("username");
     String password = server.arg("password");
 
-    // simple auth logic
-    if(username == "admin" && password == "password") {
-      server.send(200, "text/plain", "Login Success");
-      //로그인 성공시 차단된 IP 목록 초기화 또는 다른 처리
+    // simple access logic
+    if (username == "admin" && password == "password") {
+      server.sendHeader("Location", "/cctv"); //if login success, mov cctv page
+      server.send(302, "text/plain", "redirecting");
+    } else {
+      server.send(403, "text/plain", "login failed");
+      blockIP(clientIP); // 로그인 실패가 일정 횟수 초과 시 IP 차단 추가 가능
     }
-    else {
-      server.send(403, "text/plain", "로그인 실패");
-      blockIP(clientIP); // 로그인 실패가 일정 횟수 초과 시 IP 추가 가능
-    }
-  }
-  else {
-    server.send(400, "text/plain", "필요한 정보가 없습니다");
+  } else {
+    server.send(400, "text/plain", "Required info missing");
   }
 }
+
+// login page handler
+void handleLoginPage() {
+  String html = "<html><body>"
+                "<h2>Login page</h2>"
+                "<form action='/login' method='POST'>"
+                "user: <input type='text' name='username'><br>"
+                "password: <input type='password' name='password'><br>"
+                "<input type='submit' value='login'>"
+                "</form>"
+                "</body></html>";
+  server.send(200, "text/html", html);
+}
+
+// cctv screen handler
+void handleCCTV() {
+  // CCTV 페이지를 제공하는 코드, 예를 들어 HTML 또는 이미지 데이터를 반환
+  server.send(200, "text/html", "<html><body><h1>CCTV Screen</h1><img src=\"/camera\"> </body></html>");
+}
+
 void setup() {
   Serial.begin(115200);
 
@@ -87,19 +105,26 @@ void setup() {
 
   // root page
   server.on("/", []() {
-    server.send(200, "text/plain", "<h2>web server running</h2><p><a href='/login'>move to login page </a></p>");
+    server.send(200, "text/plain", "<h2>Web server running</h2><p><a href='/login'>mov to login_page</a></p>");
   });
 
-  //login page ex
+  // 로그인 페이지(GET 요청 처리)
+  server.on("/login", HTTP_GET, handleLoginPage);
+
+  // 로그인 처리(POST 요청 처리)
   server.on("/login", HTTP_POST, handleLogin);
+
+  // CCTV 화면 처리
+  server.on("/cctv", HTTP_GET, handleCCTV);
 
   server.begin();
   Serial.println("웹 서버 시작");
 
-  //print ip addr
+  // IP 주소 출력
   Serial.print("웹 서버 주소: http://");
   Serial.println(WiFi.localIP());
 }
+
 void loop() {
   server.handleClient();
 }
