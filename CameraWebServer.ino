@@ -4,7 +4,6 @@
 #include <map>
 #include <time.h>
 
-//
 const char* ntpServer = "pool.ntp.org";
 const long gmtOffset_sec = 3600 * 9;
 const int daylightOffset_sec = 0;
@@ -16,53 +15,42 @@ WebServer server(80);
 
 // Blocked IP List
 const int MAX_BLOCKED_IPS = 10;
-String blockedIPs[MAX_BLOCKED_IPS];
-int blockedIPCount = 0;
+struct BlockedIP {
+  unsigned long blockTime;
+  unsigned long unblockTime;
+};
 
-//
-const int MAX_ATTEMPTS = 40;
-const unsigned long BLOCK_DURATION = 180000;
-const int MAX_FAILED_ATTEMPTS = 5;
+std::map<String, BlockedIP> blockedIPList;
+
+// DDoS 및 DoS 설정
+const int MAX_ATTEMPTS_DDOS = 5;
+const int MAX_ATTEMPTS_DOS = 5;
+const unsigned long BLOCK_DURATION = 180000; // 3 minutes
+const unsigned long DDOS_TIME_WINDOW = 1000; // 1 second
+const unsigned long DDOS_STATE_DURATION = 60000; // 1 minute
 
 unsigned long lastAttemptTime = 0;
 int attemptCount = 0;
-bool serverBlocked = false;
+bool ddosDetected = false;
+unsigned long ddosStartTime = 0;
 
-std::map<String, int>failedAttempts;
+std::map<String, int> failedAttempts;
 std::map<String, unsigned long> failedAttemptsTime;
+std::map<String, unsigned long> lastLoginAttemptTime;
 
 String logBuffer = ""; // Buffer to store logs
+const unsigned long LOG_SEND_INTERVAL = 60000; // 1 minute
+unsigned long lastLogSendTime = 0;
 
-//
-//
-
-void logAccess(String clientIP, String url, String method, String status, String attackType) {
-  // 
-  time_t now;
-  struct tm timeinfo;
-  time(&now);
-  localtime_r(&now, &timeinfo);
-
-  char timeStr[64];
-  strftime(timeStr, sizeof(timeStr), "%Y-%m-%d %H:%M:%S", &timeinfo);
-
-  // Fixed serial number
-  String serialNumber = "F234c1";
-
-  // Create formatted log string
-  String logLine = String(timeStr) + "/" + clientIP + "/" + serialNumber + "/" + status + "/" + attackType;
-
-  Serial.println(logLine);
-
-  // Save log to buffer
-  logBuffer += logLine + "\n";
+void sendLogToServer() {
+  if (logBuffer.length() == 0) {
+    return;
+  }
 
   HTTPClient http;
-  //String serverName = serverURL;
-  
-  //http.begin(serverName);
+  http.begin("http://your-server-address/log"); // Replace with your server's URL
   http.addHeader("Content-Type", "application/x-www-form-urlencoded");
-  String postData = "dateTime=" + String(timeStr) + "&clientIP=" + clientIP + "&serialNumber=" + serialNumber + "&url=" + url + "&method=" + method + "&status=" + status + "&attackType=" + attackType;
+  String postData = "log=" + logBuffer;
 
   int httpResponseCode = http.POST(postData);
 
@@ -73,22 +61,49 @@ void logAccess(String clientIP, String url, String method, String status, String
     Serial.println("Error on sending POST: " + String(httpResponseCode));
   }
   http.end();
+  logBuffer = ""; // Clear buffer after sending
 }
 
+void logAccess(String clientIP, String url, String method, String status, String attackType) {
+  time_t now;
+  struct tm timeinfo;
+  time(&now);
+  localtime_r(&now, &timeinfo);
+
+  char timeStr[64];
+  strftime(timeStr, sizeof(timeStr), "%Y-%m-%d %H:%M:%S", &timeinfo);
+
+  String serialNumber = "F234c1";
+  String logLine = String(timeStr) + "/" + clientIP + "/" + serialNumber + "/" + status + "/" + attackType;
+
+  Serial.println(logLine);
+
+  logBuffer += logLine + "\n";
+}
 
 void blockIP(String ip) {
-  if (blockedIPCount < MAX_BLOCKED_IPS) {
-    blockedIPs[blockedIPCount++] = ip;
+  if (blockedIPList.size() < MAX_BLOCKED_IPS) {
+    unsigned long currentTime = millis();
+    BlockedIP blockedIP;
+    blockedIP.blockTime = currentTime;
+    blockedIP.unblockTime = currentTime + BLOCK_DURATION; // 차단 해제 시간을 설정합니다.
+    
+    blockedIPList[ip] = blockedIP;
     Serial.print("Blocked IP: ");
     Serial.println(ip);
   }
 }
 
 bool isIPBlocked(String ip) {
-  for (int i = 0; i < blockedIPCount; i++) {
-    if (blockedIPs[i] == ip) {
-      return true;
+  auto it = blockedIPList.find(ip);
+  if (it != blockedIPList.end()) {
+    unsigned long currentTime = millis();
+    if (currentTime > it->second.unblockTime) {
+      // 차단 해제 시간이 지난 경우
+      blockedIPList.erase(it);
+      return false;
     }
+    return true;
   }
   return false;
 }
@@ -104,10 +119,11 @@ void handleFailedLogin(String clientIP) {
   
   failedAttempts[clientIP]++;
   
-  if (failedAttempts[clientIP] >= MAX_FAILED_ATTEMPTS) {
+  if (failedAttempts[clientIP] >= MAX_ATTEMPTS_DOS) {
     blockIP(clientIP);
     logAccess(clientIP, server.uri(), server.method() == HTTP_GET ? "GET" : "POST", "Attack", "Dos");
 
+    // DoS 공격 감지 시에도 로그를 계속 전송
     server.send(403, "text/plain", "Access from blocked IP");
 
     failedAttempts.erase(clientIP);
@@ -115,42 +131,34 @@ void handleFailedLogin(String clientIP) {
   }
 }
 
-void checkDDoS() {
+void checkDDoS(String clientIP) {
   unsigned long currentTime = millis();
   
-  if (serverBlocked) {
-    if (currentTime - lastAttemptTime > BLOCK_DURATION) {
-      serverBlocked = false;
-      Serial.println("Server login block lifted");
+  if (lastLoginAttemptTime.find(clientIP) != lastLoginAttemptTime.end()) {
+    if (currentTime - lastLoginAttemptTime[clientIP] <= DDOS_TIME_WINDOW) {
+      attemptCount++;
+      if (attemptCount >= MAX_ATTEMPTS_DDOS) {
+        ddosDetected = true;
+        ddosStartTime = currentTime;
+        logAccess(clientIP, server.uri(), server.method() == HTTP_GET ? "GET" : "POST", "Attack", "DDoS");
+        Serial.println("Server login blocked (DDoS attack detected)");
+
+        // Reset attempt count and last attempt time
+        attemptCount = 0;
+        lastLoginAttemptTime.erase(clientIP);
+        return;
+      }
+    } else {
+      attemptCount = 1; // Reset attempt count after time window
     }
   } else {
-    if (currentTime - lastAttemptTime > 1000) { // Reset counter after 1 minute
-      lastAttemptTime = currentTime;
-      attemptCount = 0;
-    }
-    
-    attemptCount++;
-    
-    if (attemptCount >= 5) {
-      serverBlocked = true;
-      lastAttemptTime = currentTime; // Record block start time
-      logAccess(server.client().remoteIP().toString(), server.uri(), server.method() == HTTP_GET ? "GET" : "POST", "Attack", "DDoS");
-      //server.send(403, "text/plain", "Access from blocked IP");
-      
-      Serial.println("Server login blocked (DDoS attack detected)");
-
-      // DDoS 탐지되면 DoS 처리를 중단
-      return;
-    }
+    attemptCount = 1; // Initialize attempt count
   }
+
+  lastLoginAttemptTime[clientIP] = currentTime;
 }
 
 void handleLogin() {
-  if (serverBlocked) {
-    server.send(403, "text/plain", "Access denied due to high number of login attempts");
-    return;
-  }
-  
   String clientIP = server.client().remoteIP().toString();
 
   if (isIPBlocked(clientIP)) {
@@ -159,7 +167,28 @@ void handleLogin() {
     return;
   }
 
-  //logAccess(clientIP, server.uri(), server.method() == HTTP_GET ? "GET" : "POST", "Normal", "Login_Failed");
+  if (ddosDetected) {
+    logAccess(clientIP, server.uri(), server.method() == HTTP_GET ? "GET" : "POST", "Attack", "DDoS");
+    server.send(403, "text/plain", "Access denied due to high number of login attempts");
+    return;
+  }
+
+  unsigned long currentMillis = millis();
+  if (currentMillis - lastAttemptTime <= DDOS_TIME_WINDOW) {
+    attemptCount++;
+  } else {
+    attemptCount = 1; // Initialize attempt count
+  }
+
+  lastAttemptTime = currentMillis;
+  
+  if (attemptCount >= MAX_ATTEMPTS_DDOS) {
+    ddosDetected = true;
+    ddosStartTime = currentMillis;
+    logAccess(clientIP, server.uri(), server.method() == HTTP_GET ? "GET" : "POST", "Attack", "DDoS");
+    Serial.println("Server login blocked (DDoS attack detected)");
+    return;
+  }
 
   if (server.hasArg("username") && server.hasArg("password")) {
     String username = server.arg("username");
@@ -178,11 +207,16 @@ void handleLogin() {
     server.send(400, "text/plain", "Required info missing");
   }
 
-  checkDDoS(); // Check for DDoS attacks
+  checkDDoS(clientIP); // Check for DDoS attacks
 }
 
 void handleLog() {
   server.send(200, "text/plain", logBuffer);
+}
+
+void handleCCTV() {
+  // CCTV 페이지 처리 코드 추가
+  server.send(200, "text/html", "<html><body><h1>CCTV Feed</h1></body></html>");
 }
 
 void handleLoginPage() {
@@ -205,37 +239,28 @@ void handleLoginPage() {
                 "  padding: 20px;"
                 "  width: 300px;"
                 "}"
-                "h2 {"
-                "  text-align: center;"
-                "  color: #333;"
-                "}"
-                "input[type='text'], input[type='password'] {"
+                "input[type=text], input[type=password] {"
                 "  width: 100%;"
                 "  padding: 10px;"
                 "  margin: 10px 0;"
                 "  border: 1px solid #ddd;"
                 "  border-radius: 5px;"
-                "  box-sizing: border-box;"
                 "}"
-                "input[type='submit'] {"
+                "input[type=submit] {"
                 "  width: 100%;"
                 "  padding: 10px;"
                 "  border: none;"
+                "  border-radius: 5px;"
                 "  background-color: #4CAF50;"
                 "  color: white;"
-                "  border-radius: 5px;"
-                "  cursor: pointer;"
                 "  font-size: 16px;"
-                "}"
-                "input[type='submit']:hover {"
-                "  background-color: #45a049;"
                 "}"
                 "</style>"
                 "</head>"
                 "<body>"
                 "<div class='container'>"
-                "<h2>Login Page</h2>"
-                "<form action='/login' method='POST'>"
+                "<h2>Login</h2>"
+                "<form method='POST' action='/login'>"
                 "<label for='username'>Username:</label>"
                 "<input type='text' id='username' name='username' placeholder='Enter username' required><br>"
                 "<label for='password'>Password:</label>"
@@ -248,23 +273,9 @@ void handleLoginPage() {
   server.send(200, "text/html", html);
 }
 
-void handleCCTV() {
-  server.send(200, "text/html", "<html><body><h1>CCTV Screen</h1><img src=\"/camera\"> </body></html>");
-}
-
-void handleHomePage() {
-  String html = "<html><head><style>"
-                "body { font-family: Arial, sans-serif; margin: 0; padding: 0; background-color: #f0f0f0; }"
-                "header { background-color: #444; padding: 20px; color: white; text-align: center; }"
-                "header h1 { margin: 0; font-size: 2em; }"
-                ".container { max-width: 800px; margin: 30px auto; padding: 20px; background: white; border-radius: 8px; box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1); }"
-                "</style></head><body><header><h1>Home Page</h1></header>"
-                "<div class='container'><h2>Welcome!</h2><p>This is the home page. Click <a href='/login'>here</a> to login.</p></div></body></html>";
-  server.send(200, "text/html", html);
-}
-
 void setup() {
   Serial.begin(115200);
+
   WiFi.begin(ssid, password);
 
   while (WiFi.status() != WL_CONNECTED) {
@@ -274,15 +285,26 @@ void setup() {
   Serial.println("Connected to WiFi");
 
   configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
-  server.on("/", HTTP_GET, handleHomePage); 
-  server.on("/login", HTTP_POST, handleLogin); 
-  server.on("/login", HTTP_GET, handleLoginPage); 
-  server.on("/cctv", HTTP_GET, handleCCTV);
+
+  server.on("/", HTTP_GET, handleLoginPage);
+  server.on("/login", HTTP_POST, handleLogin);
   server.on("/log", HTTP_GET, handleLog);
-  
+  server.on("/cctv", HTTP_GET, handleCCTV);
+
   server.begin();
 }
 
 void loop() {
   server.handleClient();
+
+  unsigned long currentMillis = millis();
+  if (currentMillis - lastLogSendTime >= LOG_SEND_INTERVAL) {
+    sendLogToServer();
+    lastLogSendTime = currentMillis;
+  }
+
+  if (ddosDetected && millis() - ddosStartTime > DDOS_STATE_DURATION) {
+    ddosDetected = false;
+    Serial.println("DDoS state expired. Returning to normal operation.");
+  }
 }
